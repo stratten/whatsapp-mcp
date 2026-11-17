@@ -1,0 +1,64 @@
+name: Basil macOS release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create, for example basil-v0.7.0-1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    name: Build macOS bridge and publish release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: whatsapp-bridge/go.mod
+
+      - name: Build the bridge for Apple Silicon and Intel
+        working-directory: whatsapp-bridge
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          mkdir -p ../dist
+          GOOS=darwin GOARCH=arm64 go build -trimpath -o ../dist/whatsapp-bridge-darwin-arm64 .
+          GOOS=darwin GOARCH=amd64 go build -trimpath -o ../dist/whatsapp-bridge-darwin-amd64 .
+
+      - name: Check the architectures and the Apple Silicon signature
+        working-directory: dist
+        run: |
+          file whatsapp-bridge-darwin-arm64 | grep -q "arm64"
+          file whatsapp-bridge-darwin-amd64 | grep -q "x86_64"
+          codesign --verify --strict -v whatsapp-bridge-darwin-arm64
+          codesign -dv whatsapp-bridge-darwin-arm64 2>&1 | grep -q "Signature=adhoc"
+
+      - name: Run the Apple Silicon binary to prove it starts
+        working-directory: dist
+        run: |
+          ./whatsapp-bridge-darwin-arm64 -h 2>&1 | grep -q "full-history-pair"
+
+      - name: Package the MCP adapter source
+        run: |
+          git archive --format=tar.gz --prefix=whatsapp-mcp-server/ -o dist/whatsapp-mcp-server-source.tar.gz HEAD:whatsapp-mcp-server
+
+      - name: Write checksums
+        working-directory: dist
+        run: |
+          shasum -a 256 whatsapp-bridge-darwin-arm64 whatsapp-bridge-darwin-amd64 whatsapp-mcp-server-source.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          target_commitish: ${{ github.sha }}
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
