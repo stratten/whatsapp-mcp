@@ -198,3 +198,55 @@ func TestPairSuccessStillTimesOutAndCanRetryAuthentication(t *testing.T) {
 	c.reconnect()
 	waitConnection(t, c, "connected")
 }
+
+func TestUnpairedConnectFailureRetriesUntilTheSocketOpens(t *testing.T) {
+	c := newConnectionManager(false)
+	codes := make(chan whatsmeow.QRChannelItem, 1)
+	attempts := &atomic.Int32{}
+	c.disconnect = func() {}
+	c.preparePairing = func() {}
+	c.qrChannel = func(context.Context) (<-chan whatsmeow.QRChannelItem, error) { return codes, nil }
+	c.connect = func(context.Context) error {
+		if attempts.Add(1) < 3 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	t.Cleanup(c.close)
+	c.start()
+	waitFor := func(state string) connectionStatus {
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if s := c.snapshot(); s.State == state {
+				return s
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("wanted %s after %d attempts, got %+v", state, attempts.Load(), c.snapshot())
+		return connectionStatus{}
+	}
+	if s := waitFor("logged_out"); s.LastError == nil || s.LastError.Code != "connect_failed" {
+		t.Fatalf("first failure not reported: %+v", s)
+	}
+	codes <- whatsmeow.QRChannelItem{Event: "code", Code: "late-secret", Timeout: time.Minute}
+	if s := waitFor("pairing"); s.QRCode == nil || attempts.Load() != 3 {
+		t.Fatalf("did not recover into pairing: attempts=%d %+v", attempts.Load(), s)
+	}
+}
+
+func TestUnpairedPairingFailureDoesNotRetryUnattended(t *testing.T) {
+	c, codes, attempts := pairingFixture(t)
+	c.start()
+	waitFor := func() {
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) && c.snapshot().State != "logged_out" {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	codes <- whatsmeow.QRChannelTimeout
+	waitFor()
+	time.Sleep(7 * time.Second)
+	if attempts.Load() != 1 || c.snapshot().State != "logged_out" {
+		t.Fatalf("QR expiry retried by itself: attempts=%d %+v", attempts.Load(), c.snapshot())
+	}
+}

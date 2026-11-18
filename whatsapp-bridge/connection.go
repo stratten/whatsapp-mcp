@@ -259,7 +259,10 @@ func (c *connectionManager) start() {
 				return
 			case <-ticker.C:
 				c.mu.Lock()
-				retry := c.status.Paired && (c.status.State == "disconnected" || c.status.State == "error") && !time.Now().Before(c.nextRetry)
+				// A phone that is not linked yet still retries when the socket could not be opened at all, such as while a
+				// firewall prompt is waiting for an answer. Pairing failures and QR expiry stay manual so no QR is requested unattended.
+				socketNeverOpened := !c.status.Paired && c.status.State == "logged_out" && c.status.LastError != nil && c.status.LastError.Code == "connect_failed"
+				retry := (c.status.Paired && (c.status.State == "disconnected" || c.status.State == "error") || socketNeverOpened) && !time.Now().Before(c.nextRetry)
 				c.mu.Unlock()
 				if retry {
 					c.reconnect()
